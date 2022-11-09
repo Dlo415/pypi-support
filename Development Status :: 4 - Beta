@@ -1,0 +1,266 @@
+Environment :: Win32 (MS Windows)opensource.guide/.github/workflows/stale.yml# Top level entry required to mark this as a global AnalyzerConfig file
+is_global = Environment :: Win32 (MS Windows)Development Status :: 6 - MatureDevelopment Status :: 5 - Production/StableDevelopment Status :: 4 - BetaDevelopment Status :: 1 - Planningpy -m pip install --upgrade pip setuptools wheelpy -m venv tutorial_env
+tutorial_env\Scripts\activatepy -m venv <DIR>
+<DIR>\Scripts\activatepep-0659.rstletmaik:patch-1git clone https://bitbucket.org/pypa/distlib.gitpy -m pip install [options] <requirement specifier> [package-index-options] ...
+py -m pip install [options] -r <requirements file> [package-index-options] ...
+py -m pip install [options] [-e] <vcs project url> ...
+py -m pip install [options] [-e] <local project path> ...
+py -m pip install [options] <archive url/path> ...pip install setuptoolspip install cookiecutterhttps://github.com/ls1intum/Artemis/issues/5726#issue-1401326238// ARTEMIS: JenkinsPipeline
+
+node('docker') {
+    ownStages = null
+    try {
+        stage('Checkout') {
+            checkout([
+                $class: 'GitSCM',
+                branches: [[name: '**']],
+                doGenerateSubmoduleConfigurations: false,
+                extensions: [],
+                submoduleCfg: [],
+                userRemoteConfigs: [[
+                    credentialsId: '#gitCredentials',
+                    name: 'tests',
+                    url: '#testRepository'
+                ]]
+            ])
+            dir('#assignmentCheckoutPath') {
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: '**']],
+                    doGenerateSubmoduleConfigurations: false,
+                    extensions: [],
+                    submoduleCfg: [],
+                    userRemoteConfigs: [[
+                        credentialsId: '#gitCredentials',
+                        name: 'assignment',
+                        url: '#assignmentRepository'
+                    ]]
+                ])
+            }
+            // ToDo: the UI can already expose a switch if the solution repo should be checked out
+            // (used e.g., for Haskell exercises)
+            // this section should be (not) included accordingly
+            dir('#solutionCheckoutPath') {
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: '**']],
+                    doGenerateSubmoduleConfigurations: false,
+                    extensions: [],
+                    submoduleCfg: [],
+                    userRemoteConfigs: [[
+                        credentialsId: '#gitCredentials',
+                        name: 'solution',
+                        url: '#solutionRepository'
+                    ]]
+                ])
+            }
+        }
+        stage('Load') {
+            timestamps {
+                ownStages = load 'pipeline.groovy'
+                ownStages.testRunner()
+            }
+        }
+    } finally {
+        if (ownStages != null) {
+            ownStages.postBuildTasks()
+        }
+        sendTestResults credentialsId: '#jenkinsNotificationToken', notificationUrl: '#notificationsUrl'
+        cleanWs()
+    }
+}/*
+ * This file configures the actual build steps for the automatic grading.
+ *
+ * !!!
+ * For regular exercises, there is no need to make changes to this file.
+ * Only this base configuration is actively supported by the Artemis maintainers
+ * and/or your Artemis instance administrators.
+ * !!!
+ */
+
+import java.time.ZoneId
+import java.time.ZonedDateTime
+
+dockerImage = "docker.io/ls1tum/artemis-maven-template:java17-9"
+dockerFlags = ""
+
+// based on a similar selection based on the `env.JOB_NAME` it would also
+// be possible to create a setup with A/B testing where for each group a
+// different set of tests is run;
+// e.g., `hash(JOB_NAME) % N` to choose a different set of inputs for each
+// group that remains consistent/stable for each student between submissions
+isSolutionBuild = "${env.JOB_NAME}" ==~ /.+-SOLUTION$/
+isTemplateBuild = "${env.JOB_NAME}" ==~ /.+-BASE$/
+
+/**
+ * Main function called by Jenkins.
+ */
+void testRunner() {
+    setup()
+
+    docker.image(dockerImage).inside(dockerFlags) { c ->
+        runTestSteps()
+    }
+
+    // docker.image(dockerImage).inside(dockerFlags) { c ->
+    //     runStuffInOtherContainer()
+    // }
+
+    // Jenkins security might prevent most method calls to the regular Java API
+    // per default, they have to be approved by your Jenkins admin
+    // boolean isAfterDueDate = ZonedDateTime.now().isAfter(ZonedDateTime.of(2030, 1, 1, 0, 0, 0, 0, ZoneId.of("UTC+01:00")))
+    // if (isSolutionBuild || isAfterDueDate) {
+    //     docker.image(dockerImage).inside(dockerFlags) { c ->
+    //         catchError {
+    //             stage("Additional Tests") {
+    //                 sh 'echo "Running some expensive additional tests"'
+    //             }
+    //         }
+    //     }
+    // }
+}
+
+private void runTestSteps() {
+    catchError {
+        test()
+    }
+
+    catchError {
+        createCustomTestResult()
+    }
+
+    catchError {
+        staticCodeAnalysis()
+    }
+}
+
+/**
+ * Runs special tasks before the actual tests can begin.
+ * <p>
+ * E.g. container image build, setting docker flags.
+ */
+private void setup() {
+    if (isSolutionBuild) {
+        // potential additional steps that should only be executed for the
+        // solution repo
+    } else {
+        // if not solution repo, disallow network access from containers
+        // dockerFlags += " --network none"
+    }
+}
+
+
+/**
+ * Run unit tests
+ */
+private void test() {
+    stage('Test') {
+        sh "./gradlew clean test"
+    }
+}
+
+/**
+ * See https://docs.artemis.ase.in.tum.de/user/exercises/programming/#jenkins
+ */
+private void createCustomTestResult() {
+    stage('Custom') {
+        sh """
+        mkdir -p customFeedbacks
+        echo '{ "name": "someUniqueId", "message": "for the student", "successful": true }' | tee customFeedbacks/dummy_test.json
+        """
+    }
+}
+
+/**
+ * Runs the static code analysis
+ */
+private void staticCodeAnalysis() {
+    stage("StaticCodeAnalysis") {
+        sh """
+        ./gradlew check -x test
+
+        rm -rf staticCodeAnalysisReports
+        mkdir -p staticCodeAnalysisReports
+
+        cp target/spotbugsXml.xml staticCodeAnalysisReports
+        cp target/checkstyle-result.xml staticCodeAnalysisReports
+        cp target/pmd.xml staticCodeAnalysisReports
+        """
+    }
+}
+
+/**
+ * Script of the post build tasks aggregating all JUnit files in $WORKSPACE/results.
+ *
+ * Called by Jenkins.
+ */
+void postBuildTasks() {
+    sh 'rm -rf results'
+    sh 'mkdir results'
+    sh 'cp build/test-results/test/*.xml $WORKSPACE/results/ || true'
+}
+
+// very important, do not remove
+// required so that Jenkins finds the methods defined in this script
+return thishttps://github.com/orgs/ls1intum/projects/1#card-86611101https://github.com/orgs/ls1intum/projects/1#card-86611101https://github.com/orgs/ls1intum/projects/1#card-86611134https://github.com/orgs/ls1intum/projects/1#card-86611172https://github.com/orgs/ls1intum/projects/1#card-86611172- name: Close Stale Issues
+  uses: actions/stale@v6.0.1
+opensource.guide/.github/workflows/stale.ymlCrypto block chainsCash added to cash app account with wiz appText you copy will automatically show here
+
+# NOTE: No section headers for configuration entries
+
+#### .NET Coding Conventions ####
+
+# this. and Me. preferences
+dotnet_style_qualification_for_method = true:warning
+
+#### Diagnostic configuration ####
+
+# CA1000: Do not declare static members on generic types
+dotnet_diagnostic.CA1000.severity = warning<ItemGroup>
+  <GlobalAnalyzerConfigFiles Include="<path_to_global_analyzer_config>" />
+</ItemGroup>is_global = true
+<option_name> = <option_value># Remove the line below if you want to inherit .editorconfig settings from higher directories
+root = true
+
+# C# files
+[*.cs]
+
+#### Core EditorConfig Options ####
+
+# Indentation and spacing
+indent_size = 4
+indent_style = space
+tab_width = 4
+
+#### .NET Coding Conventions ####
+
+# this. and Me. preferences
+dotnet_style_qualification_for_method = true
+
+#### Diagnostic configuration ####
+
+# CA1000: Do not declare static members on generic types
+dotnet_diagnostic.CA1000.severity = warning[*.cs]
+<option_name> = <option_value><Catalog>
+  <Book id="bk101">
+  <Author>Garghentini, Davide</Author>
+  <Title>XML Developer's Guide</Title>
+  <Genre>Computer</Genre>
+  <Price>44.95</Price>
+  <PublishDate>2000-10-01</PublishDate>
+  <Description>
+    An in-depth look at creating applications with XML.
+  </Description>
+</Book>
+<Book id="bk102">
+  <Author>Garcia, Debra</Author>
+  <Title>Midnight Rain</Title>
+  <Genre>Fantasy</Genre>
+  <Price>5.95</Price>
+  <PublishDate>2000-12-16</PublishDate>
+  <Description>
+    A former architect battles corporate zombies, an evil
+    sorceress, and her own childhood to become queen of the world.
+  </Description>
+</Book>
+</Catalog>Crypto block chainsCash added to cash app account with wiz appText you copy will automatically show herePin copied text snippets to stop them expiring after 1 hourSlide clipboard items to delete them
